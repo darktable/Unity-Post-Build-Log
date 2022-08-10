@@ -1,6 +1,9 @@
+#define GIT_CHECK
+
 using System;
 using System.IO;
 using System.Text;
+using System.Collections.Generic;
 using UnityEditor;
 using UnityEditor.Callbacks;
 using UnityEngine;
@@ -9,6 +12,11 @@ using System.Text.RegularExpressions;
 using Debug = UnityEngine.Debug;
 
 public class PostBuildLog : ScriptableObject {
+    private static readonly Regex ASSET_ENTRY = new Regex(@"^.*% (Assets/.*)$", RegexOptions.IgnoreCase);
+    private static readonly Regex GIT_ERROR = new Regex("^error:.*'(.*)'.*$", RegexOptions.IgnoreCase);
+
+    private const string GIT_LS = "ls-files --error-unmatch{0}";
+
 	private enum STATUS
 	{
 		FOUND,
@@ -157,5 +165,143 @@ public class PostBuildLog : ScriptableObject {
 			Debug.LogException(e);
 			Debug.LogErrorFormat("Build log file could not be created for writing at: {0} for target {1}", outputPath, target);
         }
-    }
+
+#if GIT_CHECK
+		CheckGit(report.ToString());
+#endif
+	}
+
+    private static void CheckGit(string buildReport)
+	{
+		var buildAssets = new List<string>();
+
+		var unversioned = new List<string>();
+
+		var lines = buildReport.Split(new[] { Environment.NewLine, "\n" }, StringSplitOptions.RemoveEmptyEntries);
+
+		var directoryHashset = new HashSet<string>();
+
+		// for each line in buildreport
+		// see if it matches regex
+		// if so add the matched substring to assets
+		foreach (var line in lines)
+		{
+			var match = ASSET_ENTRY.Match(line);
+
+			if (match.Groups.Count == 2)
+			{
+				var asset = match.Groups[1].Value;
+
+				var path = Path.GetDirectoryName(asset).Replace('\\', '/');
+
+				if (!path.Equals("Assets", StringComparison.CurrentCultureIgnoreCase))
+				{
+					directoryHashset.Add(string.Format("{0}.meta", path));
+				}
+
+				buildAssets.Add(asset);
+			}
+		}
+
+		var arguments = new List<string>();
+
+		var stringBuilder = new StringBuilder();
+
+		foreach (var asset in buildAssets)
+		{
+			// Verify the file actually exists
+			if (!File.Exists(asset))
+			{
+				// Unity generates some assets that are added to the build.
+				// (Unity does this with movies)
+
+				//Debug.LogWarningFormat("doesn't exist: {0}", asset);
+				continue;
+			}
+
+			// also check for .meta files
+			var line = string.Format(" \"{0}\" \"{0}.meta\"", asset);
+
+			if (line.Length + stringBuilder.Length > 2000)
+			{
+				arguments.Add(stringBuilder.ToString());
+				stringBuilder.Clear();
+			}
+
+			stringBuilder.Append(line);
+		}
+
+		arguments.Add(stringBuilder.ToString());
+		stringBuilder.Clear();
+
+		foreach (var dir in directoryHashset)
+		{
+			var line = string.Format(" \"{0}\"", dir);
+
+			if (line.Length + stringBuilder.Length > 2000)
+			{
+				arguments.Add(stringBuilder.ToString());
+				stringBuilder.Clear();
+			}
+
+			stringBuilder.Append(line);
+		}
+
+		arguments.Add(stringBuilder.ToString());
+		stringBuilder.Clear();
+
+		foreach (var line in arguments)
+		{
+			using (var process = new System.Diagnostics.Process())
+			{
+				process.StartInfo.FileName = "git";
+				process.StartInfo.CreateNoWindow = true;
+				process.StartInfo.UseShellExecute = false;
+				//process.StartInfo.RedirectStandardOutput = true;
+				process.StartInfo.RedirectStandardError = true;
+				process.StartInfo.WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden;
+				process.StartInfo.Arguments = string.Format(GIT_LS, line);
+				process.Start();
+
+				process.WaitForExit();
+
+				if (process.ExitCode != 0)
+				{
+					var err = process.StandardError.ReadToEnd();
+
+					var results = err.Split(new[] { Environment.NewLine, "\n" }, StringSplitOptions.RemoveEmptyEntries);
+
+					foreach (var result in results)
+					{
+						var match = GIT_ERROR.Match(result);
+
+						if (match.Groups.Count == 2)
+						{
+							var unver = match.Groups[1].Value;
+
+							//Debug.LogWarningFormat("unversioned asset in build: {0}", unver);
+
+							unversioned.Add(unver);
+						}
+					}
+				}
+			}
+		}
+
+		if (unversioned.Count == 0)
+		{
+			Debug.Log("No unversioned assets in build!");
+		}
+		else
+		{
+			unversioned.Sort();
+
+			foreach (var asset in unversioned)
+			{
+				Debug.LogWarningFormat("unversioned asset in build: {0}", asset);
+			}
+		}
+
+		// TODO: Show a dialog box and add the assets to git?
+	}
 }
