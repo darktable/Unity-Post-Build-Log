@@ -1,6 +1,6 @@
 {
   "name": "com.github.darktable.postbuildlog",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "displayName": "Post Build Log",
   "description": "Save out a log file of scenes, assemblies, and assets included in build",
   "unity": "2018.4",
@@ -12,5 +12,6 @@
     "name": "Calvin Rien",
     "email": "",
     "url": "https://github.com/darktable"
-  }
+  },
+  "type": "tool"
 }
