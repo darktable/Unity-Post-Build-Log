@@ -14,6 +14,7 @@ using Debug = UnityEngine.Debug;
 
 public class PostBuildLog : ScriptableObject
 {
+    // Handy git commands:
     // rev-parse --short HEAD  // get hash of current revision
 
     // git diff --cached --compact-summary   // staged files that haven't been committed.
@@ -27,13 +28,20 @@ public class PostBuildLog : ScriptableObject
     private enum Status
     {
         Found,
-        End
+        End,
     }
 
     private const string k_GitFilename = "git";
     private const string k_IgnoredFiles = "ls-files -i -o --exclude-standard";
     private const string k_UnversionedFiles = "ls-files -o --exclude-standard";
 
+#if UNITY_EDITOR_WIN
+    private static readonly string k_LogPath = Path.Combine(
+        new string[] { Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Unity", "Editor", "Editor.log" });
+#else
+    private static readonly string k_LogPath = Path.Combine(
+        new string[]{ Environment.GetFolderPath(Environment.SpecialFolder.Personal), "Library", "Logs", "Unity", "Editor.log" });
+#endif
     private static readonly string[] k_Newlines = { "\r\n", "\r", "\n" };
 
     private static readonly Regex k_AssetEntry = new Regex(@"^.*% (Assets/.*)$", RegexOptions.IgnoreCase);
@@ -44,13 +52,13 @@ public class PostBuildLog : ScriptableObject
         new Regex(@"^Mono dependencies included in the build$", RegexOptions.IgnoreCase);
 
     [MenuItem("Tools/Post Build Log/Test Build Report")]
-    static void TestBuildReport()
+    private static void TestBuildReport()
     {
         EditorCoroutineUtility.StartCoroutineOwnerless(WriteBuildLog(Application.dataPath, "android"));
     }
 
     [MenuItem("Tools/Post Build Log/Find Git Unversioned")]
-    static void TestGitUnversioned()
+    private static void TestGitUnversioned()
     {
         var buildLog = new StringBuilder();
         AppendBuildLog(buildLog);
@@ -62,19 +70,19 @@ public class PostBuildLog : ScriptableObject
     }
 
     [PostProcessBuild] // Requires Unity 3.5+
-    static void OnPostProcessBuildPlayer(BuildTarget target, string buildPath)
+    private static void OnPostProcessBuildPlayer(BuildTarget target, string buildPath)
     {
         EditorCoroutineUtility.StartCoroutineOwnerless(WriteBuildLog(buildPath, target.ToString()));
     }
 
-    static void ScenesInBuild(StringBuilder report)
+    private static void ScenesInBuild(StringBuilder report)
     {
         report.Append("Scenes included in the build\n");
 
         int sceneCount = SceneManager.sceneCountInBuildSettings;
-        for (int i = 0; i < sceneCount; i++)
+        for (var i = 0; i < sceneCount; i++)
         {
-            var sceneName = SceneUtility.GetScenePathByBuildIndex(i);
+            string sceneName = SceneUtility.GetScenePathByBuildIndex(i);
 
             report.AppendFormat("{0}\n", sceneName);
         }
@@ -82,50 +90,27 @@ public class PostBuildLog : ScriptableObject
 
     private static void AppendBuildLog(StringBuilder output)
     {
-        //string editorLogFilePath = null;
-        string[] pieces;
+        var buildMarker = Status.End;
+        var dependencyMarker = Status.End;
 
-        bool winEditor = Application.platform == RuntimePlatform.WindowsEditor;
-        Status buildMarker = Status.End;
-        Status dependencyMarker = Status.End;
-
-        if (winEditor)
+        if (!File.Exists(k_LogPath))
         {
-            pieces = new string[]
-            {
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Unity", "Editor", "Editor.log"
-            };
-        }
-        else
-        {
-            pieces = new string[]
-            {
-                Environment.GetFolderPath(Environment.SpecialFolder.Personal),
-                "Library", "Logs", "Unity", "Editor.log"
-            };
-        }
-
-        string editorLogFilePath = Path.Combine(pieces);
-
-        if (!File.Exists(editorLogFilePath))
-        {
-            Debug.LogWarning("Editor log file could not be found at: " + editorLogFilePath);
+            Debug.LogWarning($"Editor log file could not be found at: {k_LogPath}");
             return;
         }
 
-        StringBuilder report = new StringBuilder();
-        StringBuilder assemblies = new StringBuilder();
+        var report = new StringBuilder();
+        var assemblies = new StringBuilder();
 
-        using (StreamReader reader =
-               new StreamReader(File.Open(editorLogFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)))
+        using (var reader =
+               new StreamReader(File.Open(k_LogPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)))
         {
             string currentLine = null;
-            int lineNum = 0;
+            var lineNum = 0;
             while (true)
             {
                 lineNum++;
-                var prevLine = currentLine;
+                string prevLine = currentLine;
                 currentLine = reader.ReadLine();
 
                 if (currentLine == null)
@@ -179,7 +164,7 @@ public class PostBuildLog : ScriptableObject
         // 1 frame after a build finishes for the
         // log file to get written out. (and delayCall doesn't work).
         yield return null;
-        
+
         var report = new StringBuilder();
 
         AppendBuildLog(report);
@@ -210,9 +195,6 @@ public class PostBuildLog : ScriptableObject
             output.AppendFormat("Build Report @ {0:u}\n\n", DateTime.Now);
 
             ScenesInBuild(output);
-
-            // output.Append(ScenesInBuild());
-            // output.Append(assemblies.ToString());
             output.Append(report);
 
             File.WriteAllText(outputPath, output.ToString());
@@ -225,37 +207,40 @@ public class PostBuildLog : ScriptableObject
         }
     }
 
-    static IEnumerator CheckGit(StringBuilder report, StringBuilder scenes)
+    private static IEnumerator CheckGit(StringBuilder report, StringBuilder scenes)
     {
         // TODO: check submodules
         // TODO: check Packages
 
+        if (report.Length == 0)
+        {
+            Debug.Log("no build report found in log.");
+            yield break; // No builds have been run.
+        }
+
         var buildAssets = new HashSet<string>();
 
-        var reader = new StringReader(report.ToString());
+        var reportReader = new StringReader(report.ToString());
 
-        var visitedDirectories = new HashSet<string>();
-        visitedDirectories.Add("Assets");
+        var visitedDirectories = new HashSet<string> { "Assets" };
 
-        while (reader.Peek() != -1)
+        while (reportReader.Peek() != -1)
         {
-            var line = reader.ReadLine();
+            string line = reportReader.ReadLine();
 
             if (string.IsNullOrWhiteSpace(line))
             {
                 continue;
             }
 
-            // var lines = buildReport.Split(new[] { Environment.NewLine, "\n" }, StringSplitOptions.RemoveEmptyEntries);
-
-            // for each line in buildreport
+            // for each line in build report
             // see if it matches regex
             // if so add the matched substring to assets
             var match = k_AssetEntry.Match(line);
 
             if (match.Groups.Count == 2)
             {
-                var asset = match.Groups[1].Value;
+                string asset = match.Groups[1].Value;
 
                 if (string.IsNullOrEmpty(asset))
                 {
@@ -300,12 +285,12 @@ public class PostBuildLog : ScriptableObject
             }
         }
 
-        var scenesList = scenes.ToString().Split(
+        string[] scenesList = scenes.ToString().Split(
             k_Newlines,
             StringSplitOptions.None
         );
 
-        foreach (var scene in scenesList)
+        foreach (string scene in scenesList)
         {
             buildAssets.Add(scene);
             buildAssets.Add($"{scene}.meta");
@@ -320,7 +305,7 @@ public class PostBuildLog : ScriptableObject
 
         yield return EditorCoroutineUtility.StartCoroutineOwnerless(RunGitCommand(k_IgnoredFiles, output));
 
-        foreach (var line in output)
+        foreach (string line in output)
         {
             if (buildAssets.Remove(line))
             {
@@ -334,7 +319,7 @@ public class PostBuildLog : ScriptableObject
         output.Clear();
         yield return EditorCoroutineUtility.StartCoroutineOwnerless(RunGitCommand(k_UnversionedFiles, output));
 
-        foreach (var line in output)
+        foreach (string line in output)
         {
             if (buildAssets.Remove(line))
             {
@@ -345,7 +330,7 @@ public class PostBuildLog : ScriptableObject
         if (ignoredFilesInBuild.Count > 0)
         {
             Debug.Log($"total ignored files in build: {ignoredFilesInBuild.Count}");
-            foreach (var file in ignoredFilesInBuild)
+            foreach (string file in ignoredFilesInBuild)
             {
                 Debug.Log($"ignored in build: {file}");
             }
@@ -354,7 +339,7 @@ public class PostBuildLog : ScriptableObject
         if (unversionedFilesInBuild.Count > 0)
         {
             Debug.Log($"total unversioned files in build: {unversionedFilesInBuild.Count}");
-            foreach (var file in unversionedFilesInBuild)
+            foreach (string file in unversionedFilesInBuild)
             {
                 Debug.Log($"unversioned in build: {file}");
             }
@@ -379,7 +364,7 @@ public class PostBuildLog : ScriptableObject
         var stopwatch = Stopwatch.StartNew();
         while (true)
         {
-            var standardOutput = process.StandardOutput.ReadLine();
+            string standardOutput = process.StandardOutput.ReadLine();
 
             if (standardOutput == null)
             {
