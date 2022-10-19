@@ -192,7 +192,7 @@ public class PostBuildLog : ScriptableObject
         try
         {
             var output = new StringBuilder();
-            output.AppendFormat("Build Report @ {0:u}\n\n", DateTime.Now);
+            output.AppendFormat("Build Report @ {0:u}\n\n", DateTime.UtcNow);
 
             ScenesInBuild(output);
             output.Append(report);
