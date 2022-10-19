@@ -1,11 +1,11 @@
-#define GIT_CHECK
-
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
+using Unity.EditorCoroutines.Editor;
 using UnityEditor;
 using UnityEditor.Callbacks;
 using UnityEngine;
@@ -14,60 +14,73 @@ using Debug = UnityEngine.Debug;
 
 public class PostBuildLog : ScriptableObject
 {
-    static readonly Regex k_AssetEntry = new Regex(@"^.*% (Assets/.*)$", RegexOptions.IgnoreCase);
-    static readonly Regex k_GitError = new Regex("^error:.*'(.*)'.*$", RegexOptions.IgnoreCase);
+    // rev-parse --short HEAD  // get hash of current revision
 
-    const string k_GitLs = "ls-files --error-unmatch{0}";
+    // git diff --cached --compact-summary   // staged files that haven't been committed.
+    //  .gitmodules | 3 +++
 
-    enum Status
+    // git ls-files --exclude-standard // everything in the repo.
+    // git ls-files -d     // deleted
+    // git ls-files -m     // modified
+    // git ls-files -o --exclude-standard    // files that need to be added
+
+    private enum Status
     {
         Found,
         End
     }
 
-    static readonly Regex k_BuildReport = new Regex(@"^Build Report$", RegexOptions.IgnoreCase);
-    static readonly Regex k_DashLine = new Regex(@"^-+$");
-    static readonly Regex k_DependenciesList = new Regex(@"^Mono dependencies included in the build$", RegexOptions.IgnoreCase);
+    private const string k_GitFilename = "git";
+    private const string k_IgnoredFiles = "ls-files -i -o --exclude-standard";
+    private const string k_UnversionedFiles = "ls-files -o --exclude-standard";
+
+    private static readonly string[] k_Newlines = { "\r\n", "\r", "\n" };
+
+    private static readonly Regex k_AssetEntry = new Regex(@"^.*% (Assets/.*)$", RegexOptions.IgnoreCase);
+    private static readonly Regex k_BuildReport = new Regex(@"^Build Report$", RegexOptions.IgnoreCase);
+    private static readonly Regex k_DashLine = new Regex(@"^-+$");
+
+    private static readonly Regex k_DependenciesList =
+        new Regex(@"^Mono dependencies included in the build$", RegexOptions.IgnoreCase);
 
     [MenuItem("Tools/Post Build Log/Test Build Report")]
     static void TestBuildReport()
     {
-        WriteBuildLog(Application.dataPath, "android");
+        EditorCoroutineUtility.StartCoroutineOwnerless(WriteBuildLog(Application.dataPath, "android"));
+    }
+
+    [MenuItem("Tools/Post Build Log/Find Git Unversioned")]
+    static void TestGitUnversioned()
+    {
+        var buildLog = new StringBuilder();
+        AppendBuildLog(buildLog);
+
+        var scenes = new StringBuilder();
+        ScenesInBuild(scenes);
+
+        EditorCoroutineUtility.StartCoroutineOwnerless(CheckGit(buildLog, scenes));
     }
 
     [PostProcessBuild] // Requires Unity 3.5+
     static void OnPostProcessBuildPlayer(BuildTarget target, string buildPath)
     {
-        // This is a hack, but on windows you have to wait
-        // 1 frame after a build finishes for the
-        // log file to get written out. (and delayCall doesn't work).
-        EditorApplication.update = CallbackFunc;
-
-        void CallbackFunc()
-        {
-            WriteBuildLog(buildPath, target.ToString());
-            EditorApplication.update -= CallbackFunc;
-        }
+        EditorCoroutineUtility.StartCoroutineOwnerless(WriteBuildLog(buildPath, target.ToString()));
     }
 
-    static string ScenesInBuild()
+    static void ScenesInBuild(StringBuilder report)
     {
-        StringBuilder scenesList = new StringBuilder();
-
-        scenesList.AppendLine("Scenes included in the build");
+        report.Append("Scenes included in the build\n");
 
         int sceneCount = SceneManager.sceneCountInBuildSettings;
         for (int i = 0; i < sceneCount; i++)
         {
             var sceneName = SceneUtility.GetScenePathByBuildIndex(i);
 
-            scenesList.AppendLine(sceneName);
+            report.AppendFormat("{0}\n", sceneName);
         }
-
-        return scenesList.ToString();
     }
 
-    static void WriteBuildLog(string buildPath, string target = "")
+    private static void AppendBuildLog(StringBuilder output)
     {
         //string editorLogFilePath = null;
         string[] pieces;
@@ -104,7 +117,8 @@ public class PostBuildLog : ScriptableObject
         StringBuilder report = new StringBuilder();
         StringBuilder assemblies = new StringBuilder();
 
-        using (StreamReader reader = new StreamReader(File.Open(editorLogFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)))
+        using (StreamReader reader =
+               new StreamReader(File.Open(editorLogFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)))
         {
             string currentLine = null;
             int lineNum = 0;
@@ -155,17 +169,33 @@ public class PostBuildLog : ScriptableObject
             }
         }
 
+        output.Append(assemblies);
+        output.Append(report);
+    }
+
+    private static IEnumerator WriteBuildLog(string buildPath, string target = "")
+    {
+        // This is a hack, but on windows you have to wait
+        // 1 frame after a build finishes for the
+        // log file to get written out. (and delayCall doesn't work).
+        yield return null;
+        
+        var report = new StringBuilder();
+
+        AppendBuildLog(report);
+
         if (report.Length == 0)
         {
             Debug.Log("no build report found in log.");
-            return; // No builds have been run.
+            yield break; // No builds have been run.
         }
 
         string outputPath;
 
         var filename = $"build {DateTime.UtcNow.ToString("s").Replace(':', '-')}.log";
 
-        if (target.StartsWith("standalone", StringComparison.InvariantCultureIgnoreCase) || target.StartsWith("android", StringComparison.InvariantCultureIgnoreCase))
+        if (target.StartsWith("standalone", StringComparison.InvariantCultureIgnoreCase) ||
+            target.StartsWith("android", StringComparison.InvariantCultureIgnoreCase))
         {
             outputPath = Path.Combine(Path.GetDirectoryName(buildPath), filename);
         }
@@ -178,35 +208,34 @@ public class PostBuildLog : ScriptableObject
         {
             var output = new StringBuilder();
             output.AppendFormat("Build Report @ {0:u}\n\n", DateTime.Now);
-            output.Append(ScenesInBuild());
-            output.Append(assemblies.ToString());
+
+            ScenesInBuild(output);
+
+            // output.Append(ScenesInBuild());
+            // output.Append(assemblies.ToString());
             output.Append(report);
 
             File.WriteAllText(outputPath, output.ToString());
-
-
         }
         catch (Exception e)
         {
             Debug.LogException(e);
-            Debug.LogErrorFormat("Build log file could not be created for writing at: {0} for target {1}", outputPath, target);
+            Debug.LogErrorFormat("Build log file could not be created for writing at: {0} for target {1}", outputPath,
+                target);
         }
-
-#if GIT_CHECK
-        CheckGit(new StringReader(report.ToString()));
-#endif
     }
 
-    static void CheckGit(StringReader reader)
+    static IEnumerator CheckGit(StringBuilder report, StringBuilder scenes)
     {
         // TODO: check submodules
         // TODO: check Packages
 
-        var buildAssets = new List<string>();
+        var buildAssets = new HashSet<string>();
 
-        var unversioned = new List<string>();
+        var reader = new StringReader(report.ToString());
 
-        var directoryHashset = new HashSet<string>();
+        var visitedDirectories = new HashSet<string>();
+        visitedDirectories.Add("Assets");
 
         while (reader.Peek() != -1)
         {
@@ -233,115 +262,137 @@ public class PostBuildLog : ScriptableObject
                     continue;
                 }
 
-                var path = Path.GetDirectoryName(asset).Replace('\\', '/');
-
-                if (!path.Equals("Assets", StringComparison.CurrentCultureIgnoreCase))
+                if (!File.Exists(asset))
                 {
-                    directoryHashset.Add(path);
+                    // Unity generates some assets that are added to the build.
+                    // (Unity does this with movies)
+
+                    Debug.LogWarningFormat("doesn't exist: {0}", asset);
+                    continue;
+                }
+
+                // TODO: skip files that are under git submodules
+
+                string directoryName = asset;
+                while (true)
+                {
+                    directoryName = Path.GetDirectoryName(directoryName);
+                    if (string.IsNullOrEmpty(directoryName))
+                    {
+                        break;
+                    }
+
+#if UNITY_EDITOR_WIN
+                    directoryName = directoryName.Replace(Path.DirectorySeparatorChar, '/');
+#endif
+
+                    if (visitedDirectories.Contains(directoryName))
+                    {
+                        continue;
+                    }
+
+                    buildAssets.Add($"{directoryName}.meta");
+                    visitedDirectories.Add(directoryName);
                 }
 
                 buildAssets.Add(asset);
+                buildAssets.Add($"{asset}.meta");
             }
         }
 
-        var arguments = new List<string>();
+        var scenesList = scenes.ToString().Split(
+            k_Newlines,
+            StringSplitOptions.None
+        );
 
-        var stringBuilder = new StringBuilder();
-
-        foreach (var asset in buildAssets)
+        foreach (var scene in scenesList)
         {
-            // Verify the file actually exists
-            if (!File.Exists(asset))
-            {
-                // Unity generates some assets that are added to the build.
-                // (Unity does this with movies)
-
-                //Debug.LogWarningFormat("doesn't exist: {0}", asset);
-                continue;
-            }
-
-            // also check for .meta files
-            var line = string.Format(" \"{0}\" \"{0}.meta\"", asset);
-
-            if (line.Length + stringBuilder.Length > 2000)
-            {
-                arguments.Add(stringBuilder.ToString());
-                stringBuilder.Clear();
-            }
-
-            stringBuilder.Append(line);
+            buildAssets.Add(scene);
+            buildAssets.Add($"{scene}.meta");
         }
 
-        arguments.Add(stringBuilder.ToString());
-        stringBuilder.Clear();
+        // every asset in the build (except Packages) should be included in buildAssets hashset.
 
-        foreach (var dir in directoryHashset)
+        // ignored files in build:
+        var ignoredFilesInBuild = new HashSet<string>();
+
+        var output = new List<string>();
+
+        yield return EditorCoroutineUtility.StartCoroutineOwnerless(RunGitCommand(k_IgnoredFiles, output));
+
+        foreach (var line in output)
         {
-            var line = $" \"{dir}.meta\"";
-
-            if (line.Length + stringBuilder.Length > 2000)
+            if (buildAssets.Remove(line))
             {
-                arguments.Add(stringBuilder.ToString());
-                stringBuilder.Clear();
-            }
-
-            stringBuilder.Append(line);
-        }
-
-        arguments.Add(stringBuilder.ToString());
-        stringBuilder.Clear();
-
-        foreach (var line in arguments)
-        {
-            using var process = new Process();
-            process.StartInfo.FileName = "git";
-            process.StartInfo.CreateNoWindow = true;
-            process.StartInfo.UseShellExecute = false;
-
-            //process.StartInfo.RedirectStandardOutput = true;
-            process.StartInfo.RedirectStandardError = true;
-            process.StartInfo.WindowStyle = ProcessWindowStyle.Hidden;
-            process.StartInfo.Arguments = string.Format(k_GitLs, line);
-            process.Start();
-
-            process.WaitForExit();
-
-            if (process.ExitCode != 0)
-            {
-                var err = process.StandardError.ReadToEnd();
-
-                var results = err.Split(new[] { Environment.NewLine, "\n" }, StringSplitOptions.RemoveEmptyEntries);
-
-                foreach (var result in results)
-                {
-                    var match = k_GitError.Match(result);
-
-                    if (match.Groups.Count == 2)
-                    {
-                        var unver = match.Groups[1].Value;
-
-                        //Debug.LogWarningFormat("unversioned asset in build: {0}", unver);
-
-                        unversioned.Add(unver);
-                    }
-                }
+                ignoredFilesInBuild.Add(line);
             }
         }
 
-        if (unversioned.Count == 0)
-        {
-            Debug.Log("No unversioned assets in build!");
-        }
-        else
-        {
-            unversioned.Sort();
+        // unversioned files in the build:
+        var unversionedFilesInBuild = new HashSet<string>();
 
-            foreach (var asset in unversioned)
+        output.Clear();
+        yield return EditorCoroutineUtility.StartCoroutineOwnerless(RunGitCommand(k_UnversionedFiles, output));
+
+        foreach (var line in output)
+        {
+            if (buildAssets.Remove(line))
             {
-                Debug.LogWarningFormat("unversioned asset in build: {0}", asset);
+                unversionedFilesInBuild.Add(line);
+            }
+        }
+
+        if (ignoredFilesInBuild.Count > 0)
+        {
+            Debug.Log($"total ignored files in build: {ignoredFilesInBuild.Count}");
+            foreach (var file in ignoredFilesInBuild)
+            {
+                Debug.Log($"ignored in build: {file}");
+            }
+        }
+
+        if (unversionedFilesInBuild.Count > 0)
+        {
+            Debug.Log($"total unversioned files in build: {unversionedFilesInBuild.Count}");
+            foreach (var file in unversionedFilesInBuild)
+            {
+                Debug.Log($"unversioned in build: {file}");
             }
         }
 
         // TODO: Show a dialog box and add the assets to git?
+    }
+
+    private static IEnumerator RunGitCommand(string command, List<string> output)
+    {
+        using var process = new Process();
+        process.StartInfo.FileName = k_GitFilename;
+        process.StartInfo.CreateNoWindow = true;
+        process.StartInfo.UseShellExecute = false;
+
+        process.StartInfo.RedirectStandardOutput = true;
+        process.StartInfo.WindowStyle = ProcessWindowStyle.Hidden;
+
+        process.StartInfo.Arguments = command;
+        process.Start();
+
+        var stopwatch = Stopwatch.StartNew();
+        while (true)
+        {
+            var standardOutput = process.StandardOutput.ReadLine();
+
+            if (standardOutput == null)
+            {
+                yield break;
+            }
+
+            output.Add(standardOutput);
+
+            if (stopwatch.ElapsedMilliseconds > 500)
+            {
+                yield return null;
+                stopwatch.Restart();
+            }
+        }
     }
 }

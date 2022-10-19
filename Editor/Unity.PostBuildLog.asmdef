@@ -1,6 +1,9 @@
 {
     "name": "Unity.PostBuildLog",
-    "references": [],
+    "rootNamespace": "",
+    "references": [
+        "Unity.EditorCoroutines.Editor"
+    ],
     "includePlatforms": [
         "Editor"
     ],
