@@ -15,6 +15,19 @@ using Debug = UnityEngine.Debug;
 
 public class PostBuildGitValidation : IPostprocessBuildWithReport
 {
+    /// <summary>
+    /// These files will be added during the build process but won't exist on disk after the build.
+    /// </summary>
+    private static readonly HashSet<string> IgnoredDefaultAssets = new HashSet<string>(new string[]
+    {
+        "Built-in Cubemap: ",
+        "Built-in Sprite: ",
+        "Built-in Texture2D: Splash Screen Unity Logo",
+        "Assets/Resources/PerformanceTestRunInfo.json",
+        "Assets/Resources/PerformanceTestRunSettings.json",
+        "Resources/unity_builtin_extra",
+    });
+
     // Handy git commands:
     // rev-parse --short HEAD  // get hash of current revision
 
@@ -212,10 +225,11 @@ public class PostBuildGitValidation : IPostprocessBuildWithReport
                 // Unity generates some assets that are added to the build.
                 // (Unity does this with movies)
 
-                // doesn't exist: 'Resources/unity_builtin_extra'
-                // doesn't exist: 'Built-in Cubemap:'
+                if (!IgnoredDefaultAssets.Contains(asset))
+                {
+                    Debug.LogWarning($"doesn't exist: '{asset}'");
+                }
 
-                Debug.LogWarning($"doesn't exist: '{asset}'");
                 continue;
             }
 
