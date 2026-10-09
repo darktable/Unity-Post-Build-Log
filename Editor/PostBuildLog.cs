@@ -20,13 +20,8 @@ public class PostBuildLog : IPostprocessBuildWithReport
         End,
     }
 
-#if UNITY_EDITOR_WIN
-    private static readonly string k_LogPath = Path.Combine(
-        new string[] { Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Unity", "Editor", "Editor.log" });
-#else
-    private static readonly string k_LogPath = Path.Combine(
-        new string[]{ Environment.GetFolderPath(Environment.SpecialFolder.Personal), "Library", "Logs", "Unity", "Editor.log" });
-#endif
+    private static string LogPath => Application.consoleLogPath;
+
     private static readonly string[] k_Newlines = { "\r\n", "\r", "\n" };
 
     private static readonly Regex k_BuildReport = new Regex(@"^Build Report$", RegexOptions.IgnoreCase);
@@ -134,7 +129,7 @@ public class PostBuildLog : IPostprocessBuildWithReport
 
         logBuilder.Append(assemblies);
         logBuilder.Append(report);
-        return true;
+        return report.Length > 0 || assemblies.Length > 0;
     }
 
     private static IEnumerator WriteBuildLog(BuildReport buildReport)
@@ -153,7 +148,7 @@ public class PostBuildLog : IPostprocessBuildWithReport
             target = buildReport.summary.platform;
             buildPath = buildReport.summary.outputPath;
 
-            GetBuildReportFromEditorLog(report, k_LogPath);
+            GetBuildReportFromEditorLog(report, LogPath);
         }
         else
         {
@@ -161,10 +156,10 @@ public class PostBuildLog : IPostprocessBuildWithReport
             target = BuildTarget.StandaloneWindows64;
             buildPath = Application.dataPath;
 
-            if (!GetBuildReportFromEditorLog(report, k_LogPath))
+            if (!GetBuildReportFromEditorLog(report, LogPath))
             {
                 Debug.Log("No build report found. Checking previous log file...");
-                string prevLogPath = Path.Combine(Path.GetDirectoryName(k_LogPath), "Editor-prev.log");
+                string prevLogPath = Path.Combine(Path.GetDirectoryName(LogPath), "Editor-prev.log");
 
                 if (!GetBuildReportFromEditorLog(report, prevLogPath))
                 {
@@ -212,6 +207,7 @@ public class PostBuildLog : IPostprocessBuildWithReport
             output.Append(report);
 
             File.WriteAllText(outputPath, output.ToString());
+            Debug.Log($"Build log written to {outputPath}");
         }
         catch (Exception e)
         {
